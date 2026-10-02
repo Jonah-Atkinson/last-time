@@ -1,7 +1,8 @@
 -- =====================================================================
 -- Last Time — RLS attack test
 -- Pretends to be two different logged-in users (A and B) plus an
--- anonymous visitor, and tries to break the rules in 0001_init.sql.
+-- anonymous visitor, and tries to break the rules in the migrations
+-- (0001-0003).
 --
 -- Before running: create two users in Dashboard > Authentication >
 -- Users > Add user > Create new user (tick "Auto Confirm User"):
@@ -9,7 +10,7 @@
 --     lasttime-test-b@example.com
 --
 -- Run: SQL Editor > New query > paste this whole file > Run.
---   Pass: one row saying ALL 16 CHECKS PASSED.
+--   Pass: one row saying ALL 21 CHECKS PASSED.
 --   Fail: an error starting with FAIL, naming the check that broke.
 -- It deletes everything it creates, so it's safe to re-run.
 -- =====================================================================
@@ -79,6 +80,58 @@ begin
     update public.profiles set user_id = b where user_id = a;
     raise exception 'FAIL 6: A changed their profile user_id to B';
   exception when insufficient_privilege or unique_violation then null;
+  end;
+
+  -- ---------- Slice 2 (0003): profile columns + onboarding ----------
+  -- These checks change A's profile, so they run inside a sub-block that
+  -- is undone at the end (the LT001 signal below). A FAIL still escapes
+  -- and fails the whole test.
+  begin
+    select onboarded_at into ts from public.profiles where user_id = a;
+    if ts is not null then
+      raise exception 'SETUP: test user A is already onboarded; delete and recreate both test users';
+    end if;
+
+    -- 17. created_at is server-owned (column not granted)
+    begin
+      update public.profiles set created_at = '2000-01-01' where user_id = a;
+      raise exception 'FAIL 17: A rewrote their profile created_at';
+    exception when insufficient_privilege then null;
+    end;
+
+    -- 18. can't finish setup without a name and a rewards choice
+    begin
+      update public.profiles set onboarded_at = now() where user_id = a;
+      raise exception 'FAIL 18: setup marked finished without name or rewards choice';
+    exception when check_violation then null;
+    end;
+
+    -- 19. finishing setup stores the SERVER time, not the browser's
+    update public.profiles
+      set display_name = 'Test A', rewards_enabled = true, onboarded_at = '2000-01-01'
+      where user_id = a
+      returning onboarded_at into ts;
+    if ts is null or ts < now() - interval '1 minute' then
+      raise exception 'FAIL 19: client controlled onboarded_at (got %)', ts;
+    end if;
+
+    -- 20. once finished, onboarded_at is frozen (can't clear or backdate)
+    update public.profiles set onboarded_at = null where user_id = a;
+    update public.profiles set onboarded_at = '2000-01-01' where user_id = a;
+    select onboarded_at into ts from public.profiles where user_id = a;
+    if ts is null or ts < now() - interval '1 minute' then
+      raise exception 'FAIL 20: onboarded_at was cleared or backdated (now %)', ts;
+    end if;
+
+    -- 21. can't undo the required rewards choice after setup
+    begin
+      update public.profiles set rewards_enabled = null where user_id = a;
+      raise exception 'FAIL 21: rewards choice was cleared after setup';
+    exception when check_violation then null;
+    end;
+
+    raise exception using errcode = 'LT001', message = 'undo slice 2 profile checks';
+  exception when sqlstate 'LT001' then null;
   end;
 
   -- ---------- act as user B: attack A's data ----------
@@ -170,7 +223,7 @@ begin
   get diagnostics n = row_count;
   if n <> 1 then raise exception 'FAIL 16: A could not delete own category'; end if;
 
-  perform set_config('lasttime.rls_result', 'ALL 16 CHECKS PASSED', false);
+  perform set_config('lasttime.rls_result', 'ALL 21 CHECKS PASSED', false);
 end;
 $$;
 
