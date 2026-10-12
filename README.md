@@ -25,7 +25,8 @@ The Supabase anon key ships in the browser by design, so **the database enforces
 | Faked history | Completions can't be in the future or before the task existed (trigger) |
 | Service-role key leaks | Never used in frontend code; `.env` ignored; GitHub push protection on; the app refuses to start if the configured key is a secret/service_role key |
 | User rewrites server-owned profile values (`created_at`, `onboarded_at`) or finishes setup without the required choices | Column-level `UPDATE` grant on `profiles` (only app-editable columns) + `profiles_guard` trigger: `onboarded_at` uses the server clock and is frozen once set |
-| Script injected through the display name (stored XSS) | Rendered as React text only; never raw HTML. Matters extra because sessions live in localStorage |
+| User rewrites a task's `created_at` to an old date, which moves the backdating guard with it and allows fake history and streaks | Column-level `INSERT`/`UPDATE` grants on `tasks` and `categories`: `id`, `user_id` and `created_at` are never writable from the browser; `archived` is update-only (Slice 3 review finding) |
+| Script injected through a display name, task name, note or category name (stored XSS) | Rendered as React text only; never raw HTML. Matters extra because sessions live in localStorage |
 | Account enumeration on the sign-in screen | New and existing emails get the same response and the same code flow |
 
 ## Database
@@ -33,7 +34,8 @@ The Supabase anon key ships in the browser by design, so **the database enforces
 - `supabase/migrations/0001_init.sql`: schema, RLS policies, triggers
 - `supabase/migrations/0002_explicit_grants.sql`: table privileges, explicitly (never rely on platform defaults)
 - `supabase/migrations/0003_profile_column_grants.sql`: column-level UPDATE on profiles + onboarding guard (Slice 2 review finding)
-- `supabase/tests/rls_check.sql`: attack test. Plays two users and an anonymous visitor, tries 21 ways to break the rules, and reports `ALL 21 CHECKS PASSED` only if every attack fails. Verified to catch deliberately broken policies (open SELECT, missing WITH CHECK, RLS disabled, anon re-granted, trigger removed).
+- `supabase/migrations/0004_task_category_column_grants.sql`: column-level INSERT/UPDATE on tasks and categories (Slice 3 review finding)
+- `supabase/tests/rls_check.sql`: attack test. Plays two users and an anonymous visitor, tries 25 ways to break the rules plus one positive control (your own legitimate edits must still work, so a migration that blocks everything can't pass), and reports `ALL 26 CHECKS PASSED` only if every attack fails and the control succeeds. Run red-then-green for each new finding: the new check must FAIL before its migration and pass after. Verified to catch deliberately broken policies (open SELECT, missing WITH CHECK, RLS disabled, anon re-granted, trigger removed).
 
 **Rule:** any change to a migration → re-run `rls_check.sql` before merging.
 
@@ -66,7 +68,7 @@ Run in order. Record pass/fail for each before merging.
 
 | # | Do this | Expected |
 |---|---|---|
-| 1 | Supabase SQL Editor: run `0003_profile_column_grants.sql`, then `supabase/tests/rls_check.sql` | `ALL 21 CHECKS PASSED` |
+| 1 | Supabase SQL Editor: run `0003_profile_column_grants.sql`, then `supabase/tests/rls_check.sql` | `ALL 21 CHECKS PASSED` (26 once 0004 exists) |
 | 2 | Temporarily set `VITE_SUPABASE_PUBLISHABLE_KEY=sb_secret_fake` (a fake value, never the real secret) and reload | App doesn't load; browser console shows the STOP error. Put the real publishable key back |
 | 3 | Sign in with your email | Email from `no-reply@mail.jonahatkinson.com` with a 6-digit code and no link |
 | 4 | Enter a wrong code | "That code is wrong or expired." No hint about which |
@@ -79,3 +81,18 @@ Run in order. Record pass/fail for each before merging.
 | 11 | Sign in on a second browser, then "Sign out everywhere" on the first | Second browser gets signed out once its access token expires (up to 1 hour). Refresh tokens are revoked immediately; access tokens can't be. Record what you see |
 | 12 | `git status` | `web/.env.local` is not listed |
 
+## Slice 3 test plan (routines + categories)
+
+Run in order. Recorded results from 12 Oct 2026 in the PR #4 description.
+
+| # | Do this | Expected |
+|---|---|---|
+| 1 | SQL Editor: run `supabase/tests/rls_check.sql` BEFORE applying 0004 | `FAIL 22` (proves the test catches the hole) |
+| 2 | Run `0004_task_category_column_grants.sql`, then `rls_check.sql` again | `ALL 26 CHECKS PASSED` |
+| 3 | Categories: add two, then add a third with a name you already used | "You already have one with that name." |
+| 4 | New routine with a category, every 7 days, a note | Shows on Home as "Every 7 days · <category>" |
+| 5 | Edit it (name, days, category) | Changes show on Home |
+| 6 | Archive it, then "Show archived", then restore it | Leaves the list, appears under archived, comes back |
+| 7 | Delete a category that a routine uses | Confirmation says the routine stays; the routine shows with no category |
+| 8 | "Delete permanently…" on a routine | A confirmation warning that history is deleted too; "Keep it" cancels |
+| 9 | Name a routine `<script>alert(1)</script>` | Shows as plain text. No popup |
