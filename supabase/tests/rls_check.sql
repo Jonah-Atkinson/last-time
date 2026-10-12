@@ -2,7 +2,7 @@
 -- Last Time — RLS attack test
 -- Pretends to be two different logged-in users (A and B) plus an
 -- anonymous visitor, and tries to break the rules in the migrations
--- (0001-0003).
+-- (0001-0004).
 --
 -- Before running: create two users in Dashboard > Authentication >
 -- Users > Add user > Create new user (tick "Auto Confirm User"):
@@ -10,7 +10,7 @@
 --     lasttime-test-b@example.com
 --
 -- Run: SQL Editor > New query > paste this whole file > Run.
---   Pass: one row saying ALL 21 CHECKS PASSED.
+--   Pass: one row saying ALL 26 CHECKS PASSED.
 --   Fail: an error starting with FAIL, naming the check that broke.
 -- It deletes everything it creates, so it's safe to re-run.
 -- =====================================================================
@@ -81,6 +81,50 @@ begin
     raise exception 'FAIL 6: A changed their profile user_id to B';
   exception when insufficient_privilege or unique_violation then null;
   end;
+
+  -- ---------- Slice 3 (0004): task and category columns ----------
+  -- 22. tasks.created_at can't be chosen at insert (column not granted).
+  --     If it could, the "no completions before the task existed" guard
+  --     (check 4) would move wherever the browser put it.
+  begin
+    insert into public.tasks (name, schedule_type, interval_days, created_at)
+      values ('backdated task', 'interval', 1, '2020-01-01');
+    raise exception 'FAIL 22: A created a task with a chosen created_at';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- 23. ...and can't be rewritten later
+  begin
+    update public.tasks set created_at = '2020-01-01' where id = a_task;
+    raise exception 'FAIL 23: A rewrote a task''s created_at';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- 24. a task's owner can't be changed (user_id not granted for update)
+  begin
+    update public.tasks set user_id = b where id = a_task;
+    raise exception 'FAIL 24: A changed a task''s user_id';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- 25. category created_at is server-owned too
+  begin
+    update public.categories set created_at = '2020-01-01' where id = a_cat;
+    raise exception 'FAIL 25: A rewrote a category''s created_at';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- 26. positive control: the columns the app DOES need still work.
+  --     Without this, a migration that blocked everything would "pass".
+  update public.tasks
+    set name = 'RLS test task (edited)', interval_days = 14, notes = 'edited', archived = true
+    where id = a_task;
+  get diagnostics n = row_count;
+  if n <> 1 then raise exception 'FAIL 26: A could not edit or archive own task'; end if;
+  update public.tasks set archived = false where id = a_task;
+  update public.categories set name = 'RLS test (edited)', color = 'teal', icon = 'home' where id = a_cat;
+  get diagnostics n = row_count;
+  if n <> 1 then raise exception 'FAIL 26: A could not edit own category'; end if;
 
   -- ---------- Slice 2 (0003): profile columns + onboarding ----------
   -- These checks change A's profile, so they run inside a sub-block that
@@ -223,7 +267,7 @@ begin
   get diagnostics n = row_count;
   if n <> 1 then raise exception 'FAIL 16: A could not delete own category'; end if;
 
-  perform set_config('lasttime.rls_result', 'ALL 21 CHECKS PASSED', false);
+  perform set_config('lasttime.rls_result', 'ALL 26 CHECKS PASSED', false);
 end;
 $$;
 

@@ -81,3 +81,48 @@ button.secondary { background: transparent; color: var(--text); border: 1px soli
 button.link { background: none; color: var(--accent); padding: 4px 0; font-weight: 500; }
 
 .row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; justify-content: space-between; }
+
+/* ---- Slice 3: lists, pickers, confirmations (still placeholder styling) ---- */
+select, textarea {
+  font: inherit;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+}
+textarea { resize: vertical; }
+
+/* Hairline-divided rows (spec: "Almanac"-style rows, not stacked cards) */
+ul.rows { list-style: none; margin: 16px 0 0; padding: 0; }
+ul.rows > li { border-top: 1px solid var(--border); padding: 10px 0; }
+ul.rows > li:last-child { border-bottom: 1px solid var(--border); }
+ul.rows.archived { opacity: 0.6; }
+.row-main { display: flex; align-items: center; gap: 10px; width: 100%; }
+.row-button {
+  background: none; color: var(--text); padding: 0; text-align: left; font-weight: 500; border-radius: 0;
+}
+.grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.block { display: block; font-weight: 400; }
+.dot {
+  width: 32px; height: 32px; border-radius: 50%; display: inline-grid; place-items: center;
+  flex: none; font-size: 1rem;
+}
+
+.swatches, .icons { display: flex; flex-wrap: wrap; gap: 8px; }
+.swatch input, .icon-pick input { position: absolute; opacity: 0; width: 0; height: 0; }
+.swatch span { display: block; width: 30px; height: 30px; border-radius: 50%; border: 2px solid transparent; }
+.swatch input:checked + span { border-color: var(--text); }
+.icon-pick span {
+  display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px;
+  border: 1px solid var(--border); font-size: 1.1rem; font-weight: 400;
+}
+.icon-pick input:checked + span { border: 2px solid var(--accent); }
+.swatch input:focus-visible + span, .icon-pick input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.editor { margin-top: 8px; }
+.danger-zone { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); display: grid; gap: 8px; justify-items: start; }
+.confirm { margin-top: 8px; padding: 12px; border: 1px solid var(--error); border-radius: 10px; width: 100%; }
+.confirm p { margin: 0; }
+button.danger { color: var(--error); }
+button.danger-fill { background: var(--error); color: #fff; }
