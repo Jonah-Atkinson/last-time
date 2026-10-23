@@ -23,6 +23,9 @@ The Supabase anon key ships in the browser by design, so **the database enforces
 | Style injection through user-chosen colors | Colors, accent, and theme restricted to fixed key lists by `CHECK` constraints |
 | Tampering with streaks or growth | Never stored; always derived from completions. `logged_at` is set by the server |
 | Faked history | Completions can't be in the future or before the task existed (trigger) |
+| Backdating a completion further than the routine allows, or editing an old completion forward to fill a gap and fake a streak | `completions_guard` (0005): backdate limit = 15% of the interval (min 1 day, max 5) in calendar days from the server-set `logged_at`; `done_at` never later than `logged_at`. Column grants: insert only `task_id`, `done_at`, `note`; update only `done_at`, `note` (Slice 4) |
+| Moving a completion onto another routine, or quietly deleting history | `task_id` not updatable; delete only within 10 minutes of logging (an undo), by RLS policy (Slice 4) |
+| **Accepted risk:** a user changes their time zone to stretch "yesterday" | Gain is under 1 day, on their own data only; accepted for travelers. Compensating control: a hard ceiling of limit + 1 days + 1 hour that ignores time zones. Recorded in the 0005 header |
 | Service-role key leaks | Never used in frontend code; `.env` ignored; GitHub push protection on; the app refuses to start if the configured key is a secret/service_role key |
 | User rewrites server-owned profile values (`created_at`, `onboarded_at`) or finishes setup without the required choices | Column-level `UPDATE` grant on `profiles` (only app-editable columns) + `profiles_guard` trigger: `onboarded_at` uses the server clock and is frozen once set |
 | User rewrites a task's `created_at` to an old date, which moves the backdating guard with it and allows fake history and streaks | Column-level `INSERT`/`UPDATE` grants on `tasks` and `categories`: `id`, `user_id` and `created_at` are never writable from the browser; `archived` is update-only (Slice 3 review finding) |
@@ -35,7 +38,8 @@ The Supabase anon key ships in the browser by design, so **the database enforces
 - `supabase/migrations/0002_explicit_grants.sql`: table privileges, explicitly (never rely on platform defaults)
 - `supabase/migrations/0003_profile_column_grants.sql`: column-level UPDATE on profiles + onboarding guard (Slice 2 review finding)
 - `supabase/migrations/0004_task_category_column_grants.sql`: column-level INSERT/UPDATE on tasks and categories (Slice 3 review finding)
-- `supabase/tests/rls_check.sql`: attack test. Plays two users and an anonymous visitor, tries 25 ways to break the rules plus one positive control (your own legitimate edits must still work, so a migration that blocks everything can't pass), and reports `ALL 26 CHECKS PASSED` only if every attack fails and the control succeeds. Run red-then-green for each new finding: the new check must FAIL before its migration and pass after. Verified to catch deliberately broken policies (open SELECT, missing WITH CHECK, RLS disabled, anon re-granted, trigger removed).
+- `supabase/migrations/0005_completion_rules.sql`: column grants on completions, the backdate and no-moving-forward rules, the 10-minute undo window, and the accepted time zone risk (Slice 4)
+- `supabase/tests/rls_check.sql`: attack test. Plays two users and an anonymous visitor, tries the ways to break the rules, plus positive controls (checks 26 and 33: your own legitimate actions must still work, so a migration that blocks everything can't pass), and reports `ALL 34 CHECKS PASSED` only if every attack fails and every control succeeds. To test time windows without waiting, it briefly acts as the database owner to plant an old routine and an old completion; the browser can't do that. Run red-then-green for each new finding: the new check must FAIL before its migration and pass after. Verified to catch deliberately broken policies (open SELECT, missing WITH CHECK, RLS disabled, anon re-granted, trigger removed).
 
 **Rule:** any change to a migration → re-run `rls_check.sql` before merging.
 
@@ -68,7 +72,7 @@ Run in order. Record pass/fail for each before merging.
 
 | # | Do this | Expected |
 |---|---|---|
-| 1 | Supabase SQL Editor: run `0003_profile_column_grants.sql`, then `supabase/tests/rls_check.sql` | `ALL 21 CHECKS PASSED` (26 once 0004 exists) |
+| 1 | Supabase SQL Editor: run `0003_profile_column_grants.sql`, then `supabase/tests/rls_check.sql` | `ALL 21 CHECKS PASSED` (26 once 0004 exists, 34 once 0005 exists) |
 | 2 | Temporarily set `VITE_SUPABASE_PUBLISHABLE_KEY=sb_secret_fake` (a fake value, never the real secret) and reload | App doesn't load; browser console shows the STOP error. Put the real publishable key back |
 | 3 | Sign in with your email | Email from `no-reply@mail.jonahatkinson.com` with a 6-digit code and no link |
 | 4 | Enter a wrong code | "That code is wrong or expired." No hint about which |
@@ -96,3 +100,27 @@ Run in order. Recorded results from 12 Oct 2026 in the PR #4 description.
 | 7 | Delete a category that a routine uses | Confirmation says the routine stays; the routine shows with no category |
 | 8 | "Delete permanently…" on a routine | A confirmation warning that history is deleted too; "Keep it" cancels |
 | 9 | Name a routine `<script>alert(1)</script>` | Shows as plain text. No popup |
+
+## Slice 4 test plan ("did it" + status)
+
+Run in order. Record pass/fail for each before merging. Steps 3-9 need at least one routine created **before today** (a routine created today can't be backdated: no completions before it existed).
+
+| # | Do this | Expected |
+|---|---|---|
+| 1 | SQL Editor: run the new `rls_check.sql` BEFORE applying 0005 | `FAIL 2: client was able to send logged_at` (recorded 23 Oct) |
+| 2 | Run `0005_completion_rules.sql`, then `rls_check.sql` again | `ALL 34 CHECKS PASSED` (recorded 23 Oct) |
+| 3 | Open the app. Look at a routine never logged | "Start any time · Not done yet" |
+| 4 | Press **Did it** on an every-7-days routine | The button pops to ✓. The row says "Due in 7 days · Done today" and moves down the list |
+| 5 | Press **Undo** (within 10 minutes) | "Undone." The row goes back to how it was |
+| 6 | Press Did it again, then wait 10+ minutes with the tab open | The Undo link disappears |
+| 7 | **Earlier or with a note…** on an every-7-days routine | Only Today and Yesterday are offered |
+| 8 | Same on an every-30-days routine (created 4+ days ago) | Today through "4 days ago" are offered, nothing further back |
+| 9 | Pick Yesterday, add a note, **Log it** | Row says "Last done yesterday". Supabase Table Editor > completions: `logged_at` ≈ now, `done_at` = yesterday, the note saved |
+| 10 | Status colors. Setup: use routines created 2+ days ago. (a) Log one "Yesterday", then edit its schedule to every 1 day. (b) Edit another to every 14 days, log it "2 days ago", then edit it to every 1 day | (a) "Due today" in amber. (b) "Overdue by 1 day" in red |
+| 11 | Look at the order of the list (there is no sort button; the order is automatic) | Most overdue first: red at the top, then amber and never-logged routines (treated as due today) by how soon they are due, then green |
+
+| 12 | Press **Did it**, then look at the button | It reads "Done ✓" and can't be pressed again today (one log per routine per day) |
+| 13 | Open **Earlier or with a note…** on a routine already logged today and yesterday | Neither day is offered. If no day is left to offer, the link doesn't show |
+
+Editing a logged completion (note or date) is allowed by the database already; its screen comes with the history list in Slice 5. "One log per day" is a screen rule, not a database rule: the Slice 5 streak math must count days, not rows.
+
