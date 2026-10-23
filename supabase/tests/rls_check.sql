@@ -2,7 +2,7 @@
 -- Last Time — RLS attack test
 -- Pretends to be two different logged-in users (A and B) plus an
 -- anonymous visitor, and tries to break the rules in the migrations
--- (0001-0004).
+-- (0001-0005).
 --
 -- Before running: create two users in Dashboard > Authentication >
 -- Users > Add user > Create new user (tick "Auto Confirm User"):
@@ -10,7 +10,7 @@
 --     lasttime-test-b@example.com
 --
 -- Run: SQL Editor > New query > paste this whole file > Run.
---   Pass: one row saying ALL 26 CHECKS PASSED.
+--   Pass: one row saying ALL 34 CHECKS PASSED.
 --   Fail: an error starting with FAIL, naming the check that broke.
 -- It deletes everything it creates, so it's safe to re-run.
 -- =====================================================================
@@ -27,8 +27,14 @@ declare
   a_cat uuid;
   a_task uuid;
   a_comp uuid;
+  a_task2 uuid;
+  a_old uuid;
+  a_new uuid;
   n int;
   ts timestamptz;
+  d timestamptz;
+  tz text;
+  admin_role text := current_user;  -- the owner role this file runs as
 begin
   select id into a from auth.users where email = 'lasttime-test-a@example.com';
   select id into b from auth.users where email = 'lasttime-test-b@example.com';
@@ -49,10 +55,14 @@ begin
     values (a_cat, 'RLS test task', 'interval', 7) returning id into a_task;
   insert into public.completions (task_id, done_at) values (a_task, now()) returning id into a_comp;
 
-  -- 2. logged_at is server-set even if the browser sends a fake one
-  insert into public.completions (task_id, done_at, logged_at)
-    values (a_task, now(), '2000-01-01') returning logged_at into ts;
-  if ts < now() - interval '1 minute' then raise exception 'FAIL 2: client was able to set logged_at'; end if;
+  -- 2. logged_at is server-owned: the browser can't even send it
+  --    (column not granted since 0005; the trigger also overwrites it)
+  begin
+    insert into public.completions (task_id, done_at, logged_at)
+      values (a_task, now(), '2000-01-01');
+    raise exception 'FAIL 2: client was able to send logged_at';
+  exception when insufficient_privilege then null;
+  end;
 
   -- 3. no completions in the future
   begin
@@ -125,6 +135,96 @@ begin
   update public.categories set name = 'RLS test (edited)', color = 'teal', icon = 'home' where id = a_cat;
   get diagnostics n = row_count;
   if n <> 1 then raise exception 'FAIL 26: A could not edit own category'; end if;
+
+  -- ---------- Slice 4 (0005): completion rules ----------
+  -- Setup, as the database owner: a 30-day routine (backdate limit 4
+  -- days) created 60 days ago, plus one completion LOGGED 10 days ago.
+  -- The browser can do neither, which is the point. The trigger is
+  -- switched off just long enough to plant the old row, because it would
+  -- (correctly) stamp logged_at = now().
+  insert into public.tasks (name, schedule_type, interval_days)
+    values ('RLS test 30-day', 'interval', 30) returning id into a_task2;
+  perform set_config('role', admin_role, true);
+  update public.tasks set created_at = now() - interval '60 days' where id = a_task2;
+  alter table public.completions disable trigger completions_guard;
+  insert into public.completions (task_id, user_id, done_at, logged_at)
+    values (a_task2, a, now() - interval '10 days', now() - interval '10 days')
+    returning id into a_old;
+  alter table public.completions enable trigger completions_guard;
+  perform set_config('role', 'authenticated', true);
+  select timezone into tz from public.profiles where user_id = a;
+
+  -- 27. a completion can't be moved to another routine
+  --     (task_id not granted for update)
+  begin
+    update public.completions set task_id = a_task2 where id = a_comp;
+    raise exception 'FAIL 27: A moved a completion to another routine';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- 28. logged_at can't be rewritten later
+  begin
+    update public.completions set logged_at = now() - interval '30 days' where id = a_comp;
+    raise exception 'FAIL 28: A sent a new logged_at';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- 29. no backdating past the routine's limit (30-day routine = 4 days)
+  begin
+    insert into public.completions (task_id, done_at) values (a_task2, now() - interval '6 days');
+    raise exception 'FAIL 29: done_at 6 days back was accepted (limit is 4)';
+  exception when check_violation then null;
+  end;
+
+  -- 30. the limit is in CALENDAR days in the user's time zone:
+  --     midnight at the start of the 4th day back is allowed,
+  --     one minute before it is not
+  d := (date_trunc('day', now() at time zone tz) - interval '4 days') at time zone tz;
+  begin
+    insert into public.completions (task_id, done_at) values (a_task2, d);
+  exception when check_violation then
+    raise exception 'FAIL 30: the start of the 4th calendar day back (%) was refused', d;
+  end;
+  begin
+    insert into public.completions (task_id, done_at) values (a_task2, d - interval '1 minute');
+    raise exception 'FAIL 30: one minute before the 4th calendar day back was accepted';
+  exception when check_violation then null;
+  end;
+
+  -- 31. an edit can't move an old completion FORWARD past when it was
+  --     logged (that would fill a gap and fake a streak)
+  begin
+    update public.completions set done_at = now() - interval '1 day' where id = a_old;
+    raise exception 'FAIL 31: a completion logged 10 days ago was moved to yesterday';
+  exception when check_violation then null;
+  end;
+
+  -- 32. undo window: a completion logged more than 10 minutes ago
+  --     can't be deleted (RLS hides it from DELETE, so 0 rows)
+  delete from public.completions where id = a_old;
+  get diagnostics n = row_count;
+  if n <> 0 then raise exception 'FAIL 32: A deleted a completion logged 10 days ago'; end if;
+
+  -- 33. positive control: what the app DOES need still works:
+  --     log late within the limit, edit an old note and date inside its
+  --     own window, undo a fresh completion
+  begin
+    insert into public.completions (task_id, done_at, note)
+      values (a_task2, now() - interval '3 days', 'logged late') returning id into a_new;
+  exception when check_violation or insufficient_privilege then
+    raise exception 'FAIL 33: A could not log a completion 3 days back (limit 4)';
+  end;
+  begin
+    update public.completions set note = 'fixed note', done_at = now() - interval '12 days'
+      where id = a_old;
+    get diagnostics n = row_count;
+    if n <> 1 then raise exception 'FAIL 33: A could not edit an old completion'; end if;
+  exception when check_violation or insufficient_privilege then
+    raise exception 'FAIL 33: A could not edit an old completion inside its window';
+  end;
+  delete from public.completions where id = a_new;
+  get diagnostics n = row_count;
+  if n <> 1 then raise exception 'FAIL 33: A could not undo a fresh completion'; end if;
 
   -- ---------- Slice 2 (0003): profile columns + onboarding ----------
   -- These checks change A's profile, so they run inside a sub-block that
@@ -267,7 +367,20 @@ begin
   get diagnostics n = row_count;
   if n <> 1 then raise exception 'FAIL 16: A could not delete own category'; end if;
 
-  perform set_config('lasttime.rls_result', 'ALL 26 CHECKS PASSED', false);
+  -- 34. deleting a routine still deletes its WHOLE history, including
+  --     completions past the 10-minute undo window (the foreign key
+  --     cascade is not subject to RLS)
+  begin
+    delete from public.tasks where id = a_task2;
+    get diagnostics n = row_count;
+    if n <> 1 then raise exception 'FAIL 34: A could not delete own routine'; end if;
+  exception when foreign_key_violation then
+    raise exception 'FAIL 34: old completions blocked deleting their routine';
+  end;
+  select count(*) into n from public.completions where task_id = a_task2;
+  if n <> 0 then raise exception 'FAIL 34: % completions survived deleting their routine', n; end if;
+
+  perform set_config('lasttime.rls_result', 'ALL 34 CHECKS PASSED', false);
 end;
 $$;
 
