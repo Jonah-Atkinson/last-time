@@ -126,3 +126,28 @@ ul.rows.archived { opacity: 0.6; }
 .confirm p { margin: 0; }
 button.danger { color: var(--error); }
 button.danger-fill { background: var(--error); color: #fff; }
+
+/* ---- Slice 4: "did it", status, completion feedback (still placeholder styling) ---- */
+.row-line { display: flex; align-items: center; gap: 10px; }
+.row-actions { display: flex; gap: 16px; padding-left: 42px; }
+.status { font-weight: 600; }
+.status-ok { color: #2e7d4f; }
+.status-soon { color: #a15c00; }
+.status-late { color: var(--error); }
+.status-new { color: var(--muted); }
+@media (prefers-color-scheme: dark) {
+  .status-ok { color: #7fd6a2; }
+  .status-soon { color: #ffc46b; }
+}
+button.did-it { flex: none; min-width: 72px; }
+button.did-it.popped { animation: check-pop 600ms ease-out; }
+@keyframes check-pop {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.25); }
+  100% { transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  button.did-it.popped { animation: none; }
+}
+.earlier { display: grid; gap: 10px; margin: 8px 0 0 42px; }
+.earlier label { display: grid; gap: 4px; }
